@@ -114,31 +114,54 @@ day <- "Tuesday"
 average_tuesday <- average_week[average_week$Day == day,]
 
 # Plot the average chosen day
-# ggplot(data = average_tuesday) +
-#   geom_point(mapping = aes(x = Date, y = Moving_average, color = "Feature of Interest")) +
-#   labs( title = "Smoothened Global Intensity vs. Time") +
-#   guides(color = guide_legend(title = "Colour Guide")) +
-#   xlab("Time") +
-#   ylab("Global Intensity (Amperes)") +
-#   scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
+ggplot(data = average_tuesday) +
+  geom_point(mapping = aes(x = Date, y = Moving_average, color = "Feature of Interest")) +
+  labs( title = "Smoothened Global Intensity vs. Time") +
+  guides(color = guide_legend(title = "Colour Guide")) +
+  xlab("Time") +
+  ylab("Global Intensity (Amperes)") +
+  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
 
-# Choose a time window: 06 - 10 is distinct
+# Choose a time window
+
+start <- 6
+end <- 8
+tuesday <- 2
 
 # Extract the same time window for each week of the dataset and concatenate the extracted
 # time windows to build a dataset for the training of HMMs.
-n_times <- subset(df, hour(df$Date) >= 6 & hour(df$Date) < 10 & wday(df$Date, week_start=1) == 2)
+n_times <- subset(df, hour(df$Date) >= start & hour(df$Date) < end & wday(df$Date, week_start=1) == tuesday)
 n_times <- subset(n_times, select = c("Date", "Time", feature_of_interest))
 
 # Train HMM's
-nstates = 3
 weeks = 52
 ntimes = rep(nrow(n_times)/weeks, weeks)
 fname <- "hmm"
 fext <- ".rds"
 
-for (i in 3:16){
+for (i in 2:16){
   hmm <- train_hmm(data = subset(n_times, select = -c(Time)), nstates = i, ntimes = ntimes, feature = feature_of_interest)
   saveRDS(hmm, file = paste(fname, as.character(i), fext, sep=""))
   summary(hmm)
   print(hmm)
+  cat("\n\n---------------------------\n\n")
 }
+
+hmm2 <- readRDS("hmm2.rds")
+hmm3 <- readRDS("hmm3.rds")
+hmm4 <- readRDS("hmm4.rds")
+hmm5 <- readRDS("hmm5.rds")
+hmm6 <- readRDS("hmm6.rds")
+hmm7 <- readRDS("hmm7.rds")
+hmm8 <- readRDS("hmm8.rds")
+hmm9 <- readRDS("hmm9.rds")
+hmm10 <- readRDS("hmm10.rds")
+hmm11 <- readRDS("hmm11.rds")
+hmm12 <- readRDS("hmm12.rds")
+hmm13 <- readRDS("hmm13.rds")
+hmm14 <- readRDS("hmm14.rds")
+hmm15 <- readRDS("hmm15.rds")
+hmm16 <- readRDS("hmm16.rds")
+
+plot(2:16,c(BIC(hmm2), BIC(hmm3), BIC(hmm4),BIC(hmm5),BIC(hmm6),BIC(hmm7), BIC(hmm8), BIC(hmm9), BIC(hmm10), BIC(hmm11), BIC(hmm12), BIC(hmm13), BIC(hmm14), BIC(hmm15), BIC(hmm16)),ty="b")
+plot(2:16,c(logLik(hmm2), logLik(hmm3), logLik(hmm4),logLik(hmm5),logLik(hmm6),logLik(hmm7), logLik(hmm8), logLik(hmm9), logLik(hmm10), logLik(hmm11), logLik(hmm12), logLik(hmm13), logLik(hmm14), logLik(hmm15), logLik(hmm16)),ty="b")
