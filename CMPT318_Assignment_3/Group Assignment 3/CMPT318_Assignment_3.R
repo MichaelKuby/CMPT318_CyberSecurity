@@ -88,7 +88,7 @@ average_week <- function(data, colname = "Global_intensity") {
   return (average_week)
 }
 train_hmm <- function(data, nstates, ntimes, feature) {
-  set.seed(1)
+  set.seed(8)
   model <- depmix(response = get(feature) ~ 1, data = data, nstates = nstates, ntimes = ntimes)
   hmm <- fit(model)
   return (hmm)
@@ -98,15 +98,14 @@ train_hmm <- function(data, nstates, ntimes, feature) {
 setwd("/Users/MichaelKuby/Documents/GitHub/CMPT318_CyberSecurity/CMPT318_Assignment_2/Group Assignment 2")
 df <- get_data()
 
-# scale the data
-for (j in 3:9)
-{
-  df[j] <- scale(df[j])
-}
+#scale the data
+df_scaled <- as.data.frame(scale(df[3:9]))
+df_scaled$Date <- df$Date
+df_scaled$Time <- df$Time
 
 # compute the average week for a given feature (column)
 feature_of_interest <- "Global_intensity"
-average_week <- average_week(df, feature_of_interest)
+average_week <- average_week(df_scaled, feature_of_interest)
 average_week$Date <- as.POSIXct(average_week$Date)
 
 # Select a day (Choose Tuesday)
@@ -123,10 +122,20 @@ ggplot(data = average_tuesday) +
   scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
 
 # Choose a time window
-
-start <- 6
-end <- 8
+start <- 5
+end <- 9
 tuesday <- 2
+
+average_tuesday_window <- subset(average_tuesday, hour(average_tuesday$Date) >= start & hour(average_tuesday$Date) < end & wday(average_tuesday$Date, week_start=1) == tuesday)
+
+# Plot the average Tuesday from start to end
+ggplot(data = average_tuesday_window) +
+  geom_point(mapping = aes(x = Date, y = Moving_average, color = "Feature of Interest")) +
+  labs( title = "Tuesday Average Global Intensity vs. Time") +
+  guides(color = guide_legend(title = "Colour Guide")) +
+  xlab("Time") +
+  ylab("Global Intensity (Amperes)") +
+  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
 
 # Extract the same time window for each week of the dataset and concatenate the extracted
 # time windows to build a dataset for the training of HMMs.
@@ -136,32 +145,28 @@ n_times <- subset(n_times, select = c("Date", "Time", feature_of_interest))
 # Train HMM's
 weeks = 52
 ntimes = rep(nrow(n_times)/weeks, weeks)
-fname <- "hmm"
-fext <- ".rds"
 
-for (i in 2:16){
-  hmm <- train_hmm(data = subset(n_times, select = -c(Time)), nstates = i, ntimes = ntimes, feature = feature_of_interest)
-  saveRDS(hmm, file = paste(fname, as.character(i), fext, sep=""))
-  summary(hmm)
-  print(hmm)
-  cat("\n\n---------------------------\n\n")
-}
+hmm4 <- train_hmm(data = subset(n_times, select = -c(Time)), nstates = 4, ntimes = ntimes, feature = feature_of_interest)
+hmm6 <- train_hmm(data = subset(n_times, select = -c(Time)), nstates = 6, ntimes = ntimes, feature = feature_of_interest)
+hmm8 <- train_hmm(data = subset(n_times, select = -c(Time)), nstates = 8, ntimes = ntimes, feature = feature_of_interest)
+hmm10 <- train_hmm(data = subset(n_times, select = -c(Time)), nstates = 10, ntimes = ntimes, feature = feature_of_interest)
+hmm12 <- train_hmm(data = subset(n_times, select = -c(Time)), nstates = 12, ntimes = ntimes, feature = feature_of_interest)
+hmm14 <- train_hmm(data = subset(n_times, select = -c(Time)), nstates = 14, ntimes = ntimes, feature = feature_of_interest)
+hmm16 <- train_hmm(data = subset(n_times, select = -c(Time)), nstates = 16, ntimes = ntimes, feature = feature_of_interest)
 
-hmm2 <- readRDS("hmm2.rds")
-hmm3 <- readRDS("hmm3.rds")
-hmm4 <- readRDS("hmm4.rds")
-hmm5 <- readRDS("hmm5.rds")
-hmm6 <- readRDS("hmm6.rds")
-hmm7 <- readRDS("hmm7.rds")
-hmm8 <- readRDS("hmm8.rds")
-hmm9 <- readRDS("hmm9.rds")
-hmm10 <- readRDS("hmm10.rds")
-hmm11 <- readRDS("hmm11.rds")
-hmm12 <- readRDS("hmm12.rds")
-hmm13 <- readRDS("hmm13.rds")
-hmm14 <- readRDS("hmm14.rds")
-hmm15 <- readRDS("hmm15.rds")
-hmm16 <- readRDS("hmm16.rds")
+num_states <- c(4, 6, 8, 10, 14)
+bic <- c(BIC(hmm4), BIC(hmm6), BIC(hmm8),BIC(hmm10),BIC(hmm14))
+logl <- c(logLik(hmm4), logLik(hmm6), logLik(hmm8),logLik(hmm10),logLik(hmm14))
 
-plot(2:16,c(BIC(hmm2), BIC(hmm3), BIC(hmm4),BIC(hmm5),BIC(hmm6),BIC(hmm7), BIC(hmm8), BIC(hmm9), BIC(hmm10), BIC(hmm11), BIC(hmm12), BIC(hmm13), BIC(hmm14), BIC(hmm15), BIC(hmm16)),ty="b")
-plot(2:16,c(logLik(hmm2), logLik(hmm3), logLik(hmm4),logLik(hmm5),logLik(hmm6),logLik(hmm7), logLik(hmm8), logLik(hmm9), logLik(hmm10), logLik(hmm11), logLik(hmm12), logLik(hmm13), logLik(hmm14), logLik(hmm15), logLik(hmm16)),ty="b")
+bic_logl_df <- data.frame(num_states = num_states, BIC = bic, logl = logl)
+
+ggplot(data = bic_logl_df) +
+  geom_line(mapping = aes(x = num_states, y = BIC, color = "BIC Value")) +
+  geom_line(mapping = aes(x = num_states, y = logl, colour = "Log Likelihood")) +
+  labs(title = "BIC Value and Log Likelihood of various HMM models vs. Number of States") +
+  guides(color = guide_legend(title = "Colour Guide")) +
+  xlab("States") +
+  ylab("Value")
+
+summary(hmm14)
+print(hmm14)
