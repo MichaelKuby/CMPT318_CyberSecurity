@@ -102,9 +102,9 @@ average_week <- function(data, colname = "Global_intensity") {
   
   return (average_week)
 }
-train_multivariate_hmm <- function(data, nstates, ntimes, features) {
-  set.seed(8)
-  model <- depmix(features, data = data, nstates = nstates, ntimes = ntimes, family=list(gaussian(),gaussian(),gaussian()))
+train_multivariate_hmm <- function(data, nstates, ntimes, features, family) {
+  set.seed(50)
+  model <- depmix(features, data = data, nstates = nstates, ntimes = ntimes, family=family)
   hmm <- fit(model)
   return (hmm)
 }
@@ -120,7 +120,7 @@ setwd("/Users/MichaelKuby/Documents/GitHub/CMPT318_CyberSecurity/Term Project")
 df <- load_data()
 
 # Use PCA to train HMM?
-use_pca <- TRUE
+use_pca <- FALSE
 
 # feature engineering
 df.pca <- perform_PCA(df)
@@ -139,27 +139,47 @@ if (use_pca) {
   rm(df2)
 } else {
   # Choose 2 or 3 features
-  # Scale the data
+  data <- as.data.frame(scale(df[3:9]))
+  data$Date <- df$Date
+  data$Time <- df$Time
+  data <- subset(data, select = c(Date, Time, Global_active_power, Voltage, Sub_metering_2))
+  data <- na.omit(data)
 }
 
 # compute the average week from 2007 for a given feature (column)
-feature_1 <- "PC1"
+if (use_pca) {
+  feature_1 <- "PC1"
+} else {
+  feature_1 <- "Sub_metering_2"
+}
+
 data_07 <- data[data$Date >= as.POSIXlt("2007-01-01") & data$Date <= as.POSIXlt("2007-12-30"),]
 average_week_PC1 <- average_week(data_07, feature_1)
-average_week_PC1$Date <- as.POSIXct(average_week_PC1$Date)
+average_week_PC1$Date <- as.POSIXct(average_week_PC1$Date)  
 
 # Select a day (Choose Tuesday)
 day <- "Tuesday"
 average_tuesday <- average_week_PC1[average_week_PC1$Day == day,]
 
-# Plot the average chosen day
-ggplot(data = average_tuesday) +
-  geom_point(mapping = aes(x = Date, y = Moving_average, color = "Smoothened PC1")) +
-  labs( title = "Smoothened PC1 vs. Time") +
-  guides(color = guide_legend(title = "Colour Guide")) +
-  xlab("Time") +
-  ylab("PC1 (Linear Combination") +
-  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
+if (use_pca) {
+  # Plot the average chosen day
+  ggplot(data = average_tuesday) +
+    geom_point(mapping = aes(x = Date, y = Moving_average, color = "Smoothened PC1")) +
+    labs( title = "Smoothened PC1 vs. Time") +
+    guides(color = guide_legend(title = "Colour Guide")) +
+    xlab("Time") +
+    ylab("PC1 (Linear Combination") +
+    scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
+} else {
+  # Plot the average chosen day
+  ggplot(data = average_tuesday) +
+    geom_point(mapping = aes(x = Date, y = Moving_average, color = "Smoothened Sub_metering_2")) +
+    labs( title = "Smoothened Sub_metering_2 vs. Time") +
+    guides(color = guide_legend(title = "Colour Guide")) +
+    xlab("Time") +
+    ylab("Sub_metering_2") +
+    scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
+}
 
 # Choose a time window
 start <- 3
@@ -168,14 +188,25 @@ tuesday <- 2
 
 average_tuesday_window <- subset(average_tuesday, hour(average_tuesday$Date) >= start & hour(average_tuesday$Date) < end & wday(average_tuesday$Date, week_start=1) == tuesday)
 
-# Plot the average Tuesday from start to end
-ggplot(data = average_tuesday_window) +
-  geom_point(mapping = aes(x = Date, y = Moving_average, color = "Smoothened PC1")) +
-  labs( title = "Smoothened PC1 vs. Time") +
-  guides(color = guide_legend(title = "Colour Guide")) +
-  xlab("Time") +
-  ylab("PC1 (Linear Combination") +
-  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
+if (use_pca) {
+  # Plot the average Tuesday from start to end
+  ggplot(data = average_tuesday_window) +
+    geom_point(mapping = aes(x = Date, y = Moving_average, color = "Smoothened PC1")) +
+    labs( title = "Smoothened PC1 vs. Time") +
+    guides(color = guide_legend(title = "Colour Guide")) +
+    xlab("Time") +
+    ylab("PC1 (Linear Combination") +
+    scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
+} else {
+  # Plot the average Tuesday from start to end
+  ggplot(data = average_tuesday_window) +
+    geom_point(mapping = aes(x = Date, y = Moving_average, color = "Smoothened Sub_metering_2")) +
+    labs( title = "Smoothened Sub_metering_2 vs. Time") +
+    guides(color = guide_legend(title = "Colour Guide")) +
+    xlab("Time") +
+    ylab("Sub_metering_2") +
+    scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
+}
 
 # remove what we don't need anymore
 rm(data_07)
@@ -189,24 +220,26 @@ test <- subset(data, hour(data$Date) >= start & hour(data$Date) < end & wday(dat
 # Train HMM's
 weeks = 107
 ntimes = rep(nrow(train)/weeks, weeks)
+family = list(gaussian(), gaussian(), gaussian())
 
 if (use_pca){
   features = list(PC1~1, PC2~1, PC3~1)
 } else {
   # features should be set
+  features = list(Sub_metering_2~1, Global_active_power~1, Voltage~1) #
 }
 
-hmm4 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 4, ntimes = ntimes, feature = features)
-hmm6 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 6, ntimes = ntimes, feature = features)
-hmm8 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 8, ntimes = ntimes, feature = features)
-hmm10 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 10, ntimes = ntimes, feature = features)
-hmm12 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 12, ntimes = ntimes, feature = features)
-hmm14 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 14, ntimes = ntimes, feature = features)
-hmm16 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 16, ntimes = ntimes, feature = features)
-hmm18 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 18, ntimes = ntimes, feature = features)
-hmm20 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 20, ntimes = ntimes, feature = features)
-hmm22 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 22, ntimes = ntimes, feature = features)
-hmm24 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 24, ntimes = ntimes, feature = features)
+hmm4 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 4, ntimes = ntimes, feature = features, family = family)
+hmm6 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 6, ntimes = ntimes, feature = features, family = family)
+hmm8 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 8, ntimes = ntimes, feature = features, family = family)
+hmm10 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 10, ntimes = ntimes, feature = features, family = family)
+hmm12 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 12, ntimes = ntimes, feature = features, family = family)
+hmm14 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 14, ntimes = ntimes, feature = features, family = family)
+hmm16 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 16, ntimes = ntimes, feature = features, family = family)
+hmm18 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 18, ntimes = ntimes, feature = features, family = family)
+hmm20 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 20, ntimes = ntimes, feature = features, family = family)
+hmm22 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 22, ntimes = ntimes, feature = features, family = family)
+hmm24 <- train_multivariate_hmm(data = subset(train, select = -c(Time)), nstates = 24, ntimes = ntimes, feature = features, family = family)
 
 num_states <- c(4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24)
 bic <- c(BIC(hmm4), BIC(hmm6), BIC(hmm8),BIC(hmm10),BIC(hmm12),BIC(hmm14),BIC(hmm16),BIC(hmm18),BIC(hmm20),BIC(hmm22), BIC(hmm24))
