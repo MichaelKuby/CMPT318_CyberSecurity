@@ -1,0 +1,384 @@
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggcorrplot)
+library(lubridate)
+library(forecast)
+library(zoo)
+library("depmixS4")
+
+load_data <- function(filename) {
+  # Get the data from the data set
+  data <- read.table(filename, header = TRUE)
+  
+  # Convert the column Date to Date objects (so that we can extract)
+  data$Date = as.POSIXlt(data$Date, format = "%d/%m/%Y")
+  
+  # Extract data from all complete weeks
+  df <- data[data$Date >= as.POSIXlt("2006-12-11") & data$Date <= as.POSIXlt("2009-11-30"),]
+  
+  # Parse column 2 into separate columns
+  dfsplit <- strsplit(df[,2], ",") # split the data
+  df2 <- data.frame(dfsplit) # Put the data into a df
+  df2 <- as.data.frame(t(df2)) #transpose to turn rows into cols
+  rm(dfsplit)
+  
+  # Reindexing with help from James Comment: 
+  # https://stackoverflow.com/questions/7567790/change-the-index-number-of-a-dataframe
+  rownames(df2) <- 1:nrow(df2)
+  df2 <- subset(df2, select = -V1) # Drop all columns we dont need
+  df2$V2 <- substr(df2$V2, 2, 9) # Drop the quotations from "time" column
+  
+  # Rename the column names
+  colnames(df2) <- c("Time", "Global_active_power", "Global_reactive_power", "Voltage", "Global_intensity", "Sub_metering_1", "Sub_metering_2", "Sub_metering_3")
+  
+  # Merge Date and Time into one column
+  df$Date <- as.POSIXlt(paste(df$Date, df2$Time), format = "%Y-%m-%d %H:%M:%S")
+  
+  # Drop the columns that we don't want anymore
+  df <- subset (df, select = Date)
+  df$Time <- df2$Time
+  df2 <- subset (df2, select = -Time)
+  
+  # Merge df and df2 and deselect all we dont need
+  df <- cbind(df, df2)
+  
+  # Convert from char to numeric values
+  df[,3:9] <- sapply(df[,3:9], as.numeric)
+  
+  return (df)
+}
+load_anomaly_data <- function(filename){
+  # Get the data from the data set
+  data <- read.table(filename, header = TRUE)
+  
+  # Convert the column Date to Date objects (so that we can extract)
+  data$Date = as.POSIXlt(data$Date, format = "%d/%m/%Y")
+  
+  
+  # Parse column 2 into separate columns
+  dfsplit <- strsplit(data[,2], ",") # split the data
+  df2 <- data.frame(dfsplit) # Put the data into a df
+  df2 <- as.data.frame(t(df2)) #transpose to turn rows into cols
+  rm(dfsplit)
+  
+  # Reindexing with help from James Comment: 
+  # https://stackoverflow.com/questions/7567790/change-the-index-number-of-a-dataframe
+  rownames(df2) <- 1:nrow(df2)
+  df2 <- subset(df2, select = -V1) # Drop all columns we dont need
+  df2$V2 <- substr(df2$V2, 2, 9) # Drop the quotations from "time" column
+  
+  # Rename the column names
+  colnames(df2) <- c("Time", "Global_active_power", "Global_reactive_power", "Voltage", "Global_intensity", "Sub_metering_1", "Sub_metering_2", "Sub_metering_3")
+  
+  # Merge Date and Time into one column
+  data$Date <- as.POSIXlt(paste(data$Date, df2$Time), format = "%Y-%m-%d %H:%M:%S")
+  
+  # Drop the columns that we don't want anymore
+  data <- subset (data, select = Date)
+  data$Time <- df2$Time
+  df2 <- subset (df2, select = -Time)
+  
+  # Merge df and df2 and deselect all we dont need
+  data <- cbind(data, df2)
+  
+  # Convert from char to numeric values
+  data[,3:9] <- sapply(data[,3:9], as.numeric)
+  return (data)
+}
+perform_PCA <- function(df) {
+  df = na.omit(df)
+  df.pca <- prcomp(df[, 3:9], center = TRUE, scale. = TRUE, retx = TRUE)
+  summary(df.pca)
+  head(df.pca$x)
+  # How many components should we use?
+  return (df.pca)
+}
+split_data <- function(data) {
+  set.seed(123)
+  sample <- sample(c(rep(0, 0.7 * nrow(data)), rep(1, 0.3 * nrow(data))))
+  return (sample)
+}
+average_week <- function(data, colname = "Global_intensity") {
+  df <- subset(data, select = c(Date, Time))
+  df2 <- subset(data, select = c(colname))
+  df <- cbind(df, df2)
+  rm(df2)
+  
+  df$Day = weekdays(as.Date(df$Date))
+  
+  # n weeks, ms samples and msn number of samples returned for the week
+  n = 52
+  nw = 1
+  msn = 10080
+  ms = 10
+  df_ma <- data.frame(Date = data$Date, 
+                      Num_week=strftime(data$Date, format = "%V"), 
+                      Day = strftime(data$Date, format = "%A"),
+                      Time = strftime(data$Date, format = "%T"),
+                      Moving_average=data[colname])
+  
+  df_ma$Num_week <- sub("^0", "", df_ma$Num_week)
+  
+  # breakdown the average calculations per week 
+  df_ma$Moving_average <- ma(data[colname], ms, centre = TRUE)
+  
+  # create average week
+  average_week <- df_ma %>% group_by(Day, Time)
+  average_week <- average_week %>% summarise(
+    Moving_average = mean(Moving_average, na.rm = TRUE)
+  )
+  
+  # manually reorder average_week
+  order <- c("Monday", "Tuesday", "Wednesday", "Thursday","Friday", "Saturday", "Sunday")
+  average_week = average_week %>%
+    mutate(Day = factor(Day, levels = order)) %>%
+    arrange(Day)
+  
+  average_week <- na.omit(average_week)
+  average_week$Date <- df[1:10080, "Date"]
+  
+  return (average_week)
+}
+train_multivariate_hmm <- function(data, nstates, end, start) {
+  set.seed(1)
+  
+  # Train HMM's
+  weeks = nrow(data) / ((end - start) * 60)
+  ntimes = rep(nrow(data)/weeks, weeks)
+  
+  features = list(PC1~1, PC2~1, PC3~1)
+  family = list(gaussian(), gaussian(), gaussian())
+  
+  model <- depmix(features, data = data, nstates = nstates, ntimes = ntimes, family=family)
+  hmm <- fit(model)
+  return (hmm)
+}
+test_multivariate_hmm <- function(data, chosen_hmm, end, start) {
+  set.seed(1)
+  weeks = nrow(data) / ((end - start) * 60)
+  ntimes = rep(nrow(data)/weeks, weeks)
+  
+  features = list(PC1~1, PC2~1, PC3~1)
+  family = list(gaussian(), gaussian(), gaussian())
+  
+  new_mod <- depmix(response = features, data = data, nstates = chosen_hmm@nstates, ntimes = ntimes, family=family)
+  new_mod <- setpars(new_mod, getpars(chosen_hmm))
+  new_fm <- forwardbackward(new_mod, return.all=TRUE, useC=TRUE)
+  
+  return(new_fm)
+}
+compute_log_Lik <- function (filename, start, end, day, PCA, chosen_hmm) {
+  # import data to test for anomalies
+  anomaly_data <- load_anomaly_data(filename)
+  
+  # Select the hours we are interested in
+  anomaly_data <- subset(anomaly_data, hour(anomaly_data$Date) >= start & hour(anomaly_data$Date) < end & wday(anomaly_data$Date, week_start=1) == tuesday)
+  
+  # Convert and scale the data based on the PCA
+  anomaly_data_PC_scaled <- scale(x = subset(anomaly_data, select = -c(Date, Time)), PCA$center, PCA$scale) %*% PCA$rotation 
+  
+  # Drop features 4-7
+  anomaly_data_PC_scaled <- subset(x = anomaly_data_PC_scaled, select = c(PC1, PC2, PC3))
+  
+  # Put the data in a dataframe not a matrix
+  anomaly_data_PC_scaled <- as.data.frame(anomaly_data_PC_scaled)
+  
+  weeks = nrow(anomaly_data_PC_scaled) / ((end - start) * 60)
+  ntimes = rep(nrow(anomaly_data_PC_scaled)/weeks, weeks)
+  
+  # Test the data with our chosen hmm for the log Likelihood
+  tested_hmm <- test_multivariate_hmm(anomaly_data_PC_scaled, chosen_hmm, end, start)
+  print(tested_hmm$logLik)
+  
+  return (tested_hmm)
+}
+
+# main
+setwd("/Users/MichaelKuby/Documents/GitHub/CMPT318_CyberSecurity/Term Project")
+df <- load_data("TermProjectData.txt")
+
+# feature engineering
+df.pca <- perform_PCA(df)
+
+# Select the features we wish to use
+
+# Use PC1, PC2, PC3 to explain 68% of the variation in the data
+data = df.pca$x
+data = subset(data, select = c(PC1, PC2, PC3))
+data <- as.data.frame(data)  
+
+# add in the day and time
+df2 <- na.omit(df)
+data$Date <- df2$Date
+data$Time <- df2$Time
+rm(df2)
+
+
+# compute the average week from 2007 for a given feature (column)
+feature_1 <- "PC1"
+
+data_07 <- data[data$Date >= as.POSIXlt("2007-01-01") & data$Date <= as.POSIXlt("2007-12-30"),]
+average_week_PC1 <- average_week(data_07, feature_1)
+average_week_PC1$Date <- as.POSIXct(average_week_PC1$Date)  
+
+# Select a day (Choose Tuesday)
+day <- "Tuesday"
+average_tuesday <- average_week_PC1[average_week_PC1$Day == day,]
+
+# Plot the average chosen day
+ggplot(data = average_tuesday) +
+  geom_point(mapping = aes(x = Date, y = Moving_average, color = "Smoothened PC1")) +
+  labs( title = "Smoothened PC1 vs. Time") +
+  guides(color = guide_legend(title = "Colour Guide")) +
+  xlab("Time") +
+  ylab("PC1 Value") +
+  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
+
+
+# Choose a time window
+start <- 3
+end <- 6
+tuesday <- 2
+
+average_tuesday_window <- subset(average_tuesday, hour(average_tuesday$Date) >= start & hour(average_tuesday$Date) < end & wday(average_tuesday$Date, week_start=1) == tuesday)
+
+# Plot the average Tuesday from start to end
+ggplot(data = average_tuesday_window) +
+  geom_point(mapping = aes(x = Date, y = Moving_average, color = "Smoothened PC1")) +
+  labs( title = "Smoothened PC1 vs. Time") +
+  guides(color = guide_legend(title = "Colour Guide")) +
+  xlab("Time") +
+  ylab("PC1") +
+  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H")
+
+# remove what we don't need anymore
+rm(data_07)
+rm(average_tuesday)
+
+# Split the data into train and test
+# sample <- sample(c(rep(0, 0.7 * nrow(data)), rep(1, 0.3 * nrow(data)))) # used for random sampling and won't work for our purposes.
+train <- subset(data, hour(data$Date) >= start & hour(data$Date) < end & wday(data$Date, week_start=1) == tuesday & year(data$Date) < 2009)
+test <- subset(data, hour(data$Date) >= start & hour(data$Date) < end & wday(data$Date, week_start=1) == tuesday & year(data$Date) >= 2009)
+train <- subset(train, select = -c(Date, Time))
+test <- subset(test, select = -c(Date, Time))
+
+############ TRAIN ############
+
+hmm4_PC <- train_multivariate_hmm(data = train, nstates = 4, end = end, start = start)
+hmm6_PC <- train_multivariate_hmm(data = train, nstates = 6, end = end, start = start)
+hmm8_PC <- train_multivariate_hmm(data = train, nstates = 8, end = end, start = start)
+hmm10_PC <- train_multivariate_hmm(data = train, nstates = 10, end = end, start = start)
+hmm12_PC <- train_multivariate_hmm(data = train, nstates = 12, end = end, start = start)
+hmm14_PC <- train_multivariate_hmm(data = train, nstates = 14, end = end, start = start)
+hmm16_PC <- train_multivariate_hmm(data = train, nstates = 16, end = end, start = start)
+hmm18_PC <- train_multivariate_hmm(data = train, nstates = 18, end = end, start = start)
+hmm20_PC <- train_multivariate_hmm(data = train, nstates = 20, end = end, start = start)
+hmm22_PC <- train_multivariate_hmm(data = train, nstates = 22, end = end, start = start)
+hmm24_PC <- train_multivariate_hmm(data = train, nstates = 24, end = end, start = start)
+
+############ TRAIN >= 30 states ############
+
+hmm30_PC <- train_multivariate_hmm(data = train, nstates = 30, end = end, start = start)
+hmm35_PC <- train_multivariate_hmm(data = train, nstates = 35, end = end, start = start)
+hmm40_PC <- train_multivariate_hmm(data = train, nstates = 40, end = end, start = start)
+hmm45_PC <- train_multivariate_hmm(data = train, nstates = 45, end = end, start = start)
+hmm50_PC <- train_multivariate_hmm(data = train, nstates = 50, end = end, start = start)
+
+#Graph the results from all up to 24 states train data
+num_states <- c(4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24)
+bic <- c(BIC(hmm4_PC), BIC(hmm6_PC), BIC(hmm8_PC),BIC(hmm10_PC),BIC(hmm12_PC),BIC(hmm14_PC),BIC(hmm16_PC),BIC(hmm18_PC),BIC(hmm20_PC),BIC(hmm22_PC), BIC(hmm24_PC))
+logl <- c(logLik(hmm4_PC), logLik(hmm6_PC), logLik(hmm8_PC),logLik(hmm10_PC),logLik(hmm12_PC),logLik(hmm14_PC),logLik(hmm16_PC),logLik(hmm18_PC),logLik(hmm20_PC),logLik(hmm22_PC), logLik(hmm24_PC))
+
+bic_logl_df <- data.frame(num_states = num_states, BIC = bic, logl = logl)
+
+ggplot(data = bic_logl_df) +
+  geom_line(mapping = aes(x = num_states, y = BIC, color = "BIC Value")) +
+  geom_line(mapping = aes(x = num_states, y = logl, colour = "Log Likelihood")) +
+  labs(title = "BIC Value and Log Likelihood of various HMM models vs. Number of States") +
+  guides(color = guide_legend(title = "Colour Guide")) +
+  xlab("States") +
+  ylab("Value")
+
+
+#Graph the results from all 50 states train data
+num_states <- c(4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 30, 35, 40, 45, 50)
+bic <- c(BIC(hmm4_PC), BIC(hmm6_PC), BIC(hmm8_PC),BIC(hmm10_PC),BIC(hmm12_PC),BIC(hmm14_PC),BIC(hmm16_PC),BIC(hmm18_PC),BIC(hmm20_PC),BIC(hmm22_PC), BIC(hmm24_PC), BIC(hmm30_PC), BIC(hmm35_PC), BIC(hmm40_PC), BIC(hmm45_PC), BIC(hmm50_PC))
+logl <- c(logLik(hmm4_PC), logLik(hmm6_PC), logLik(hmm8_PC),logLik(hmm10_PC),logLik(hmm12_PC),logLik(hmm14_PC),logLik(hmm16_PC),logLik(hmm18_PC),logLik(hmm20_PC),logLik(hmm22_PC), logLik(hmm24_PC), logLik(hmm30_PC), logLik(hmm35_PC), logLik(hmm40_PC), logLik(hmm45_PC), logLik(hmm50_PC))
+
+bic_logl_df <- data.frame(num_states = num_states, BIC = bic, logl = logl)
+
+ggplot(data = bic_logl_df) +
+  geom_line(mapping = aes(x = num_states, y = BIC, color = "BIC Value")) +
+  geom_line(mapping = aes(x = num_states, y = logl, colour = "Log Likelihood")) +
+  labs(title = "BIC Value and Log Likelihood of various HMM models vs. Number of States") +
+  guides(color = guide_legend(title = "Colour Guide")) +
+  xlab("States") +
+  ylab("Value")
+
+print(bic_logl_df)
+
+# Feed the scaled test data to the models to calculate log-likelihood of the test data.
+test_hmm4_PC <- test_multivariate_hmm(test, hmm4_PC, end, start)
+test_hmm6_PC <- test_multivariate_hmm(test, hmm6_PC, end, start)
+test_hmm8_PC <- test_multivariate_hmm(test, hmm8_PC, end, start)
+test_hmm10_PC <- test_multivariate_hmm(test, hmm10_PC, end, start)
+test_hmm12_PC <- test_multivariate_hmm(test, hmm12_PC, end, start)
+test_hmm14_PC <- test_multivariate_hmm(test, hmm14_PC, end, start)
+test_hmm16_PC <- test_multivariate_hmm(test, hmm16_PC, end, start)
+test_hmm18_PC <- test_multivariate_hmm(test, hmm18_PC, end, start)
+test_hmm20_PC <- test_multivariate_hmm(test, hmm20_PC, end, start)
+test_hmm22_PC <- test_multivariate_hmm(test, hmm22_PC, end, start)
+test_hmm24_PC <- test_multivariate_hmm(test, hmm24_PC, end, start)
+test_hmm30_PC <- test_multivariate_hmm(test, hmm30_PC, end, start)
+test_hmm35_PC <- test_multivariate_hmm(test, hmm35_PC, end, start)
+test_hmm40_PC <- test_multivariate_hmm(test, hmm40_PC, end, start)
+test_hmm45_PC <- test_multivariate_hmm(test, hmm45_PC, end, start)
+test_hmm50_PC <- test_multivariate_hmm(test, hmm50_PC, end, start)
+
+#Graph the results from the test data
+num_states <- c(4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 30, 35, 40, 45, 50)
+logl <- c(test_hmm4_PC$logLike, test_hmm6_PC$logLike, test_hmm8_PC$logLike, test_hmm10_PC$logLike, test_hmm12_PC$logLike, test_hmm14_PC$logLike, test_hmm16_PC$logLike, test_hmm18_PC$logLike, test_hmm20_PC$logLike, test_hmm22_PC$logLike, test_hmm24_PC$logLike, test_hmm30_PC$logLike, test_hmm35_PC$logLike, test_hmm40_PC$logLike, test_hmm45_PC$logLike, test_hmm50_PC$logLike)
+
+testfm_logl_df <- data.frame(num_states = num_states, logl = logl)
+
+ggplot(data = testfm_logl_df) +
+  geom_line(mapping = aes(x = num_states, y = logl, colour = "Log Likelihood")) +
+  labs(title = "Log Likelihood of various HMM models on Test Data vs. Number of States") +
+  guides(color = guide_legend(title = "Colour Guide")) +
+  xlab("Number of states") +
+  ylab("Log Likelihood")
+
+# Test data sets for anomalies
+
+# 8 states
+anomaly_8state_data_1 <- compute_log_Lik("DataWithAnomalies1.txt", start, end, tuesday, df.pca, hmm8_PC)
+anomaly_8state_data_2 <- compute_log_Lik("DataWithAnomalies2.txt", start, end, tuesday, df.pca, hmm8_PC)
+anomaly_8state_data_3 <- compute_log_Lik("DataWithAnomalies3.txt", start, end, tuesday, df.pca, hmm8_PC)
+
+# 24 states
+anomaly_24state_data_1 <- compute_log_Lik("DataWithAnomalies1.txt", start, end, tuesday, df.pca, hmm24_PC)
+anomaly_24state_data_2 <- compute_log_Lik("DataWithAnomalies2.txt", start, end, tuesday, df.pca, hmm24_PC)
+anomaly_24state_data_3 <- compute_log_Lik("DataWithAnomalies3.txt", start, end, tuesday, df.pca, hmm24_PC)
+
+# 40 states
+anomaly_40state_data_1 <- compute_log_Lik("DataWithAnomalies1.txt", start, end, tuesday, df.pca, hmm40_PC)
+anomaly_40state_data_2 <- compute_log_Lik("DataWithAnomalies2.txt", start, end, tuesday, df.pca, hmm40_PC)
+anomaly_40state_data_3 <- compute_log_Lik("DataWithAnomalies3.txt", start, end, tuesday, df.pca, hmm40_PC)
+
+# Put those three lists into a dataframe
+num_states <- c(8, 24, 40)
+anomalydata1 <- c(anomaly_8state_data_1$logLik, anomaly_24state_data_1$logLik, anomaly_40state_data_1$logLik)
+anomalydata2 <- c(anomaly_8state_data_2$logLik, anomaly_24state_data_2$logLik, anomaly_40state_data_2$logLik)
+anomalydata3 <- c(anomaly_8state_data_3$logLik, anomaly_24state_data_3$logLik, anomaly_40state_data_3$logLik)
+results.df <- data.frame(Model_States = num_states, Data_set_1 = anomalydata1, Data_set_2 = anomalydata2, Data_set_3 = anomalydata3)
+
+# Graph the results of the dataframe
+ggplot(data = results.df) +
+  geom_line(mapping = aes(x = num_states, y = Data_set_1, colour = "DataWithAnomalies1.txt")) +
+  geom_line(mapping = aes(x = num_states, y = Data_set_2, colour = "DataWithAnomalies2.txt")) +
+  labs(title = "Log Likelihood of 8 / 24 / 40 state trained HMM models on Data with Anomalies") +
+  guides(color = guide_legend(title = "Colour Guide")) +
+  xlab("States") +
+  ylab("Log Likelihood")
+
